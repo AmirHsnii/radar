@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+celerybeat-schedule
+celerybeat-schedule.db
+.env
+.env.*
+!.env.example

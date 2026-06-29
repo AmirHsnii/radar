@@ -1,0 +1,129 @@
+# Radar — full stack
+#
+# پورت‌های expose شده:
+#   8101  →  پنل مدیریت (React / Vite)
+#   8100  →  FastAPI مستقیم
+#   5435  →  PostgreSQL
+#   6381  →  Redis
+
+x-backend: &backend
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://radar:radar_pass@postgres:5432/radar
+    REDIS_URL: redis://redis:6379/0
+  volumes:
+    - ./backend:/app
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: radar
+      POSTGRES_PASSWORD: radar_pass
+      POSTGRES_DB: radar
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radar -d radar"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Migration (one-shot) ────────────────────────────────────────────────────
+
+  migrate:
+    <<: *backend
+    command: alembic upgrade head
+    restart: "no"
+    ports: []
+
+  # ── Backend ─────────────────────────────────────────────────────────────────
+
+  backend:
+    <<: *backend
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8100:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  celery_worker:
+    <<: *backend
+    restart: unless-stopped
+    command: celery -A celery_worker worker --loglevel=info --concurrency=4
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  celery_beat:
+    <<: *backend
+    restart: unless-stopped
+    command: celery -A celery_beat beat --loglevel=info --schedule /var/run/celery/celerybeat-schedule
+    volumes:
+      - ./backend:/app
+      - celery_beat_data:/var/run/celery
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ── Frontend (React + Vite preview) ───────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    restart: unless-stopped
+    environment:
+      VITE_DEV_API_TARGET: http://backend:8000
+    ports:
+      - "8101:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  celery_beat_data:
